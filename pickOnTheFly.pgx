@@ -1,0 +1,252 @@
+// pickOnTheFly.pgx
+// Prise a la volee sur convoyeur avec suivi par encodeur
+// Strategies d'approche, cycle pick-and-place, synchronisation
+// TP robotique industrielle -- Staubli TX2-90
+
+program pickOnTheFly
+
+  // parametres du convoyeur
+  local num nVConvoyeur = 200       // mm/s
+  local num nLargeurConv = 400      // mm
+  local num nYConvoyeur = 300       // mm (centre)
+  local num nVMaxRobot = 1000       // mm/s
+  local num nAMaxRobot = 5000       // mm/s^2
+  local num nXDetection = 0         // mm (capteur)
+  local num nXPriseMin = 200        // mm (debut zone)
+  local num nXPriseMax = 600        // mm (fin zone)
+  local num nZApproche = 100        // mm (hauteur securite)
+  local num nZPrise = 5             // mm (hauteur prise)
+  local num nZDepot = 30            // mm
+  local num nTempsFermeture = 0.05  // s (gripper)
+  local num nTempsOuverture = 0.04  // s
+  local num nTolerance = 3.0        // mm (ecart max)
+
+  // positions
+  local point pDepot, pRepos
+  local tool tPince
+
+  // file d'objets
+  local num nMaxObjets = 20
+  local num tObjXDet[20]       // position x a la detection
+  local num tObjTDet[20]       // temps de detection
+  local num tObjYOff[20]       // decalage lateral
+  local num tObjEtat[20]       // 0=attente, 1=pris, 2=rate
+  local num nNbObjets = 0
+
+  // resultats
+  local num nPris = 0
+  local num nRates = 0
+  local num nTotalObjets = 0
+
+begin
+  // configurer l'outil
+  tPince.trsf.x = 0
+  tPince.trsf.y = 0
+  tPince.trsf.z = 150
+
+  pDepot = composerPoint(400, -200, nZDepot, 0, 0, 0)
+  pRepos = composerPoint(100, 0, 250, 0, 0, 0)
+
+  // generer les objets avec intervalles irreguliers
+  nTotalObjets = 12
+  local num nTDet
+  nTDet = 0
+  local num k
+  for k = 0 to nTotalObjets - 1
+    nTDet = nTDet + 0.8 + 0.5   // intervalle moyen de 1.3 s
+    tObjXDet[k] = nXDetection
+    tObjTDet[k] = nTDet
+    tObjYOff[k] = (k % 5 - 2) * 40.0   // decalage lateral varie
+    tObjEtat[k] = 0
+    nNbObjets = nNbObjets + 1
+  endFor
+
+  logMsg("Objets generes    : " + toString("", nTotalObjets))
+  logMsg("V convoyeur       : " + toString("", nVConvoyeur) + " mm/s")
+  logMsg("Zone de prise     : [" + toString("", nXPriseMin) + ", " + toString("", nXPriseMax) + "] mm")
+  logMsg("")
+
+  // approche par le dessus
+  logMsg("--- Strategie : approche par le dessus ---")
+  call cyclePickPlace("dessus")
+  logMsg("Pris       : " + toString("", nPris) + "/" + toString("", nTotalObjets))
+  local num nTaux
+  nTaux = nPris * 100.0 / nTotalObjets
+  logMsg("Taux       : " + toString(".1", nTaux) + "%")
+
+  // reset pour la strategie laterale
+  for k = 0 to nNbObjets - 1
+    tObjEtat[k] = 0
+  endFor
+  nPris = 0
+  nRates = 0
+
+  logMsg("")
+  logMsg("--- Strategie : approche laterale ---")
+  call cyclePickPlace("laterale")
+  nTaux = nPris * 100.0 / nTotalObjets
+  logMsg("Pris       : " + toString("", nPris) + "/" + toString("", nTotalObjets))
+  logMsg("Taux       : " + toString(".1", nTaux) + "%")
+
+  // retour repos
+  movej(pRepos, tPince, mNomSpeed)
+  wait(isSettled())
+  logMsg("")
+  logMsg("Cycle termine")
+end
+
+// cycle principal pick-and-place
+program cyclePickPlace(string sStrategie)
+  local num nTCourant = 0
+  local num idx, xObj, tSortie, tDispo
+  local num xPrise
+  local point pRobot, pPrise
+  local bool bFaisable
+  local num nVMoy, nErrSync
+
+  pRobot = pRepos
+
+  for idx = 0 to nNbObjets - 1
+    if tObjEtat[idx] != 0
+      // deja traite
+    else
+      // position actuelle de l'objet
+      xObj = positionObjet(idx, nTCourant)
+
+      // objet sorti de zone ?
+      if xObj > nXPriseMax
+        tObjEtat[idx] = 2
+        nRates = nRates + 1
+        logMsg("Objet " + toString("", idx + 1) + " : rate (sorti de zone)")
+      else
+        // attendre que l'objet entre dans la zone de prise
+        if xObj < nXPriseMin
+          nTCourant = nTCourant + (nXPriseMin - xObj) / nVConvoyeur
+        endIf
+        xObj = positionObjet(idx, nTCourant)
+
+        // temps disponible
+        tSortie = (nXPriseMax - xObj) / nVConvoyeur
+        tDispo = tSortie * 0.7
+
+        // position de prise predite
+        xPrise = positionObjet(idx, nTCourant + tDispo)
+        pPrise = composerPoint(xPrise, nYConvoyeur + tObjYOff[idx], nZPrise, 0, 0, 0)
+
+        // verification de faisabilite
+        call verifierFaisabilite(pRobot, pPrise, tDispo, bFaisable, nVMoy)
+
+        if !bFaisable
+          tObjEtat[idx] = 2
+          nRates = nRates + 1
+          logMsg("Objet " + toString("", idx + 1) + " : rate (v=" + toString(".0", nVMoy) + " mm/s)")
+        else
+          // deplacement vers la zone de prise
+          if sStrategie == "dessus"
+            call approcheDessus(pRobot, pPrise, tDispo)
+          else
+            call approcheLaterale(pRobot, pPrise, tDispo)
+          endIf
+
+          // synchronisation avec le convoyeur
+          nTCourant = nTCourant + tDispo
+
+          // erreur de synchronisation
+          local num xObjReel
+          xObjReel = positionObjet(idx, nTCourant)
+          nErrSync = abs(xPrise - xObjReel)
+
+          // tentative de prise
+          local num nProba
+          nProba = probabilitePrise(nErrSync)
+
+          if nProba > 0.5
+            // prise reussie
+            close(tPince)
+            delay(nTempsFermeture)
+            tObjEtat[idx] = 1
+            nPris = nPris + 1
+            logMsg("Objet " + toString("", idx + 1) + " : pris (err=" + toString(".2", nErrSync) + " mm, p=" + toString(".2", nProba) + ")")
+
+            // depot
+            movel(pDepot, tPince, mNomSpeed)
+            wait(isSettled())
+            open(tPince)
+            delay(nTempsOuverture)
+            nTCourant = nTCourant + 0.5 + nTempsOuverture
+
+            // retour repos
+            movej(pRepos, tPince, mNomSpeed)
+            wait(isSettled())
+            pRobot = pRepos
+          else
+            tObjEtat[idx] = 2
+            nRates = nRates + 1
+            logMsg("Objet " + toString("", idx + 1) + " : rate (prise echouee, p=" + toString(".2", nProba) + ")")
+            pRobot = pPrise
+            pRobot.trsf.z = nZApproche
+          endIf
+        endIf
+      endIf
+    endIf
+  endFor
+end
+
+// position x d'un objet au temps t
+program positionObjet(num idx, num t) : num
+  return tObjXDet[idx] + nVConvoyeur * (t - tObjTDet[idx])
+end
+
+// probabilite de reussite de la prise
+program probabilitePrise(num nErreur) : num
+  local num nSigma
+  nSigma = nTolerance / 2.0
+  return 0.95 * exp(-0.5 * power(nErreur / nSigma, 2))
+end
+
+// verification de faisabilite cinematique
+program verifierFaisabilite(point pInit, point pCible, num tDispo, bool& bOk, num& nVMoy)
+  local num nDist
+  nDist = distance(pInit, pCible)
+  nVMoy = nDist / tDispo
+  bOk = (nVMoy < nVMaxRobot * 0.8)
+end
+
+// approche par le dessus
+program approcheDessus(point pDepart, point pCible, num tDispo)
+  local point pInter
+  pInter = pCible
+  pInter.trsf.z = nZApproche
+  movel(pInter, tPince, mNomSpeed)
+  wait(isSettled())
+  movel(pCible, tPince, mNomSpeed * 0.3)
+  wait(isSettled())
+end
+
+// approche laterale
+program approcheLaterale(point pDepart, point pCible, num tDispo)
+  local point pLateral, pInter
+  pLateral = pCible
+  pLateral.trsf.y = nYConvoyeur - nLargeurConv / 2 - 50
+  pLateral.trsf.z = nZPrise + 30
+  movel(pLateral, tPince, mNomSpeed)
+  wait(isSettled())
+  pInter = pCible
+  pInter.trsf.z = nZPrise + 15
+  movel(pInter, tPince, mNomSpeed * 0.5)
+  wait(isSettled())
+  movel(pCible, tPince, mNomSpeed * 0.3)
+  wait(isSettled())
+end
+
+// composer un point cartesien
+program composerPoint(num x, num y, num z, num rx, num ry, num rz) : point
+  local point p
+  p.trsf.x = x
+  p.trsf.y = y
+  p.trsf.z = z
+  p.trsf.rx = rx
+  p.trsf.ry = ry
+  p.trsf.rz = rz
+  return p
+end

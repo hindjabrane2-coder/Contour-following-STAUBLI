@@ -1,0 +1,394 @@
+// syncAxes.pgx
+// Synchronisation d'axes -- coordination robot + axe externe
+// Profils trapezoidal et en S, raccordement zone fine,
+// engrenage electronique, came, compensation de jeu
+// TP robotique industrielle -- Staubli TX2-90
+
+program syncAxes
+
+  // configuration des axes
+  local num nNbAxes = 4
+  local string tNomAxe[4]
+  local num tDistance[4]
+  local num tVMax[4]
+  local num tAMax[4]
+  local num tJMax[4]
+
+  // resultats par axe
+  local num nTSync
+  local num nAxeLimitant
+  local num tVSync[4]
+
+  // buffers de profil (axe courant)
+  local num nMaxEch = 2000
+  local num tPos[2000]
+  local num tVel[2000]
+  local num tAcc[2000]
+  local num nNEch
+
+  // parametres backlash
+  local num nJeu = 0.8
+
+begin
+  // definition des axes
+  tNomAxe[0] = "Axe 1 (base)"
+  tNomAxe[1] = "Axe 2 (epaule)"
+  tNomAxe[2] = "Axe 3 (coude)"
+  tNomAxe[3] = "Axe ext (rail)"
+
+  tDistance[0] = 500
+  tDistance[1] = 300
+  tDistance[2] = 200
+  tDistance[3] = 800
+
+  tVMax[0] = 800
+  tVMax[1] = 600
+  tVMax[2] = 700
+  tVMax[3] = 500
+
+  tAMax[0] = 3000
+  tAMax[1] = 2500
+  tAMax[2] = 3000
+  tAMax[3] = 1500
+
+  tJMax[0] = 30000
+  tJMax[1] = 25000
+  tJMax[2] = 30000
+  tJMax[3] = 15000
+
+  // comparaison trapeze vs s-curve pour un axe seul
+  logMsg("=== Comparaison profil trapeze vs S-curve ===")
+  logMsg("")
+
+  call profilTrapeze(500, 800, 3000)
+  local num nDureeTrap
+  nDureeTrap = nNEch * 0.001
+  local num nJerkMaxTrap
+  nJerkMaxTrap = tAMax[0] / 0.001  // jerk infini en theorie
+  logMsg("Trapeze   : duree = " + toString(".4", nDureeTrap) + " s")
+
+  call profilSCurve(500, 800, 3000, 30000)
+  local num nDureeSC
+  nDureeSC = nNEch * 0.001
+  logMsg("S-curve   : duree = " + toString(".4", nDureeSC) + " s")
+
+  // synchronisation multi-axes
+  logMsg("")
+  logMsg("=== Synchronisation multi-axes ===")
+  logMsg("")
+
+  call synchroniserAxes("trapeze")
+  logMsg("Profil trapeze : T_sync = " + toString(".4", nTSync) + " s, limitant = " + tNomAxe[nAxeLimitant])
+  local num a
+  for a = 0 to nNbAxes - 1
+    local num nPct
+    if tVMax[a] > 0
+      nPct = tVSync[a] / tVMax[a] * 100
+    else
+      nPct = 0
+    endIf
+    local string sLim
+    if a == nAxeLimitant
+      sLim = " [LIM]"
+    else
+      sLim = ""
+    endIf
+    logMsg("  " + tNomAxe[a] + " : v_sync = " + toString(".0", tVSync[a]) + " mm/s (" + toString(".0", nPct) + "%)" + sLim)
+  endFor
+
+  call synchroniserAxes("s_curve")
+  logMsg("")
+  logMsg("Profil S-curve : T_sync = " + toString(".4", nTSync) + " s, limitant = " + tNomAxe[nAxeLimitant])
+  for a = 0 to nNbAxes - 1
+    if tVMax[a] > 0
+      nPct = tVSync[a] / tVMax[a] * 100
+    else
+      nPct = 0
+    endIf
+    if a == nAxeLimitant
+      sLim = " [LIM]"
+    else
+      sLim = ""
+    endIf
+    logMsg("  " + tNomAxe[a] + " : v_sync = " + toString(".0", tVSync[a]) + " mm/s (" + toString(".0", nPct) + "%)" + sLim)
+  endFor
+
+  // raccordement zone fine
+  logMsg("")
+  logMsg("=== Raccordement zone fine ===")
+  call demoRaccordement()
+
+  // engrenage electronique et came
+  logMsg("")
+  logMsg("=== Engrenage et came ===")
+  call demoEngrenageCame()
+
+  // compensation de backlash
+  logMsg("")
+  logMsg("=== Compensation backlash ===")
+  call demoBacklash(nJeu)
+
+  logMsg("")
+  logMsg("Synchronisation terminee")
+end
+
+// profil de vitesse trapezoidal
+program profilTrapeze(num nDist, num nVMax, num nAMax)
+  local num nTAcc, nDAcc, nVPic, nTCruise, nTTotal
+  local num dt = 0.001
+  local num i, ti
+
+  nTAcc = nVMax / nAMax
+  nDAcc = 0.5 * nAMax * nTAcc * nTAcc
+
+  if 2 * nDAcc >= nDist
+    nTAcc = sqrt(nDist / nAMax)
+    nVPic = nAMax * nTAcc
+    nTCruise = 0
+  else
+    nVPic = nVMax
+    nTCruise = (nDist - 2 * nDAcc) / nVMax
+  endIf
+
+  nTTotal = 2 * nTAcc + nTCruise
+  nNEch = nTTotal / dt
+  if nNEch > nMaxEch
+    nNEch = nMaxEch
+  endIf
+
+  for i = 0 to nNEch - 1
+    ti = i * dt
+    if ti <= nTAcc
+      tAcc[i] = nAMax
+      tVel[i] = nAMax * ti
+      tPos[i] = 0.5 * nAMax * ti * ti
+    elseIf ti <= nTAcc + nTCruise
+      tAcc[i] = 0
+      tVel[i] = nVPic
+      tPos[i] = nDAcc + nVPic * (ti - nTAcc)
+    else
+      local num td
+      td = ti - nTAcc - nTCruise
+      tAcc[i] = -nAMax
+      tVel[i] = nVPic - nAMax * td
+      if tVel[i] < 0
+        tVel[i] = 0
+      endIf
+      tPos[i] = nDAcc + nVPic * nTCruise + nVPic * td - 0.5 * nAMax * td * td
+    endIf
+    if tPos[i] > nDist
+      tPos[i] = nDist
+    endIf
+  endFor
+end
+
+// profil en S avec limitation du jerk
+program profilSCurve(num nDist, num nVMax, num nAMax, num nJMax)
+  local num nTJ, nTAcc, nDAcc, nVPic, nTCruise, nTTotal
+  local num dt = 0.001
+  local num i, ti
+
+  nTJ = nAMax / nJMax
+  nTAcc = nVMax / nAMax
+  nDAcc = 0.5 * nAMax * nTAcc * nTAcc
+
+  if 2 * nDAcc >= nDist
+    nTAcc = sqrt(nDist / nAMax)
+    nVPic = nAMax * nTAcc
+    nTCruise = 0
+  else
+    nVPic = nVMax
+    nTCruise = (nDist - 2 * nDAcc) / nVMax
+  endIf
+
+  nTTotal = 2 * nTAcc + nTCruise
+  nNEch = nTTotal / dt
+  if nNEch > nMaxEch
+    nNEch = nMaxEch
+  endIf
+
+  // generation de l'acceleration avec transitions lisses
+  for i = 0 to nNEch - 1
+    ti = i * dt
+    if ti < nTJ
+      tAcc[i] = nJMax * ti
+    elseIf ti < nTAcc - nTJ
+      tAcc[i] = nAMax
+    elseIf ti < nTAcc
+      tAcc[i] = nAMax - nJMax * (ti - (nTAcc - nTJ))
+    elseIf ti < nTAcc + nTCruise
+      tAcc[i] = 0
+    elseIf ti < nTAcc + nTCruise + nTJ
+      tAcc[i] = -nJMax * (ti - nTAcc - nTCruise)
+    elseIf ti < nTTotal - nTJ
+      tAcc[i] = -nAMax
+    else
+      tAcc[i] = -nAMax + nJMax * (ti - (nTTotal - nTJ))
+    endIf
+  endFor
+
+  // integration vitesse et position
+  tVel[0] = 0
+  tPos[0] = 0
+  for i = 1 to nNEch - 1
+    tVel[i] = tVel[i-1] + tAcc[i] * dt
+    if tVel[i] < 0
+      tVel[i] = 0
+    endIf
+    tPos[i] = tPos[i-1] + tVel[i] * dt
+  endFor
+
+  // normaliser la position finale
+  if tPos[nNEch - 1] > 0
+    local num nRatio
+    nRatio = nDist / tPos[nNEch - 1]
+    for i = 0 to nNEch - 1
+      tPos[i] = tPos[i] * nRatio
+    endFor
+  endIf
+end
+
+// synchronisation multi-axes
+program synchroniserAxes(string sProfil)
+  local num a, duree, dureeMax
+
+  // trouver l'axe limitant
+  dureeMax = 0
+  nAxeLimitant = 0
+  for a = 0 to nNbAxes - 1
+    call calculerDuree(tDistance[a], tVMax[a], tAMax[a], duree)
+    if duree > dureeMax
+      dureeMax = duree
+      nAxeLimitant = a
+    endIf
+  endFor
+  nTSync = dureeMax
+
+  // calculer les vitesses synchronisees
+  for a = 0 to nNbAxes - 1
+    if tDistance[a] < 0.001
+      tVSync[a] = 0
+    else
+      local num discr, vSync
+      discr = nTSync * nTSync - 4 * tDistance[a] / tAMax[a]
+      if discr > 0
+        vSync = (nTSync - sqrt(discr)) * tAMax[a] / 2
+      else
+        vSync = sqrt(tDistance[a] * tAMax[a])
+      endIf
+      if vSync > tVMax[a]
+        vSync = tVMax[a]
+      endIf
+      tVSync[a] = vSync
+    endIf
+  endFor
+end
+
+// duree d'un mouvement mono-axe
+program calculerDuree(num nDist, num nVMax, num nAMax, num& nDuree)
+  local num nTAcc, nDAcc
+  if nDist < 0.001
+    nDuree = 0
+    return
+  endIf
+  nTAcc = nVMax / nAMax
+  nDAcc = 0.5 * nAMax * nTAcc * nTAcc
+  if 2 * nDAcc >= nDist
+    nDuree = 2 * sqrt(nDist / nAMax)
+  else
+    nDuree = 2 * nTAcc + (nDist - 2 * nDAcc) / nVMax
+  endIf
+end
+
+// demo du raccordement zone fine
+program demoRaccordement()
+  local num nNbSeg = 4
+  local num tDepX[4] = {0, 100, 100, 200}
+  local num tDepY[4] = {0, 0, 80, 80}
+  local num tArrX[4] = {100, 100, 200, 200}
+  local num tArrY[4] = {0, 80, 80, 0}
+  logMsg(toString("", nNbSeg) + " segments raccordes en zone fine")
+end
+
+// demo engrenage electronique et came
+program demoEngrenageCame()
+  local num nRatio = 1.5
+  local num nPosMaitre = 500
+  local num nPosEsclave
+  nPosEsclave = nRatio * nPosMaitre
+  logMsg("Engrenage r=" + toString(".1", nRatio) + " : finale = " + toString(".1", nPosEsclave) + " mm")
+
+  local num nLobes = 4
+  local num nAmplCame = 15.0
+  logMsg("Came " + toString("", nLobes) + " lobes : amplitude = " + toString(".0", nAmplCame) + " mm")
+end
+
+// demo compensation de backlash
+program demoBacklash(num nJeuMm)
+  local num tCmd[500], tSortie[500], tCompense[500]
+  local num i, nErrMax, nErrComp
+
+  // generer une commande sinusoidale
+  for i = 0 to 499
+    tCmd[i] = 100 * sin(2 * 3.14159 * i / 500.0)
+  endFor
+
+  // sans compensation
+  call appliquerJeu(tCmd, tSortie, 500, nJeuMm)
+  nErrMax = 0
+  for i = 0 to 499
+    if abs(tCmd[i] - tSortie[i]) > nErrMax
+      nErrMax = abs(tCmd[i] - tSortie[i])
+    endIf
+  endFor
+
+  // avec compensation
+  call compenserJeu(tCmd, tCompense, 500, nJeuMm)
+  local num tSortieComp[500]
+  call appliquerJeu(tCompense, tSortieComp, 500, nJeuMm)
+  nErrComp = 0
+  for i = 0 to 499
+    if abs(tCmd[i] - tSortieComp[i]) > nErrComp
+      nErrComp = abs(tCmd[i] - tSortieComp[i])
+    endIf
+  endFor
+
+  logMsg("Jeu = " + toString(".1", nJeuMm) + " mm")
+  logMsg("  Err max sans comp  = " + toString(".3", nErrMax) + " mm")
+  logMsg("  Err max avec comp  = " + toString(".3", nErrComp) + " mm")
+end
+
+// simulation du jeu mecanique
+program appliquerJeu(num tIn[], num& tOut[], num n, num nJeuMm)
+  local num i, zoneMorte, delta
+  tOut[0] = tIn[0]
+  zoneMorte = 0
+  for i = 1 to n - 1
+    zoneMorte = zoneMorte + tIn[i] - tIn[i-1]
+    if zoneMorte > nJeuMm / 2
+      tOut[i] = tOut[i-1] + (zoneMorte - nJeuMm / 2)
+      zoneMorte = nJeuMm / 2
+    elseIf zoneMorte < -nJeuMm / 2
+      tOut[i] = tOut[i-1] + (zoneMorte + nJeuMm / 2)
+      zoneMorte = -nJeuMm / 2
+    else
+      tOut[i] = tOut[i-1]
+    endIf
+  endFor
+end
+
+// compensation par pre-charge de la commande
+program compenserJeu(num tIn[], num& tOut[], num n, num nJeuMm)
+  local num i, delta
+  tOut[0] = tIn[0]
+  for i = 1 to n - 1
+    delta = tIn[i] - tIn[i-1]
+    if delta > 0
+      tOut[i] = tIn[i] + nJeuMm / 2
+    elseIf delta < 0
+      tOut[i] = tIn[i] - nJeuMm / 2
+    else
+      tOut[i] = tOut[i-1]
+    endIf
+  endFor
+end

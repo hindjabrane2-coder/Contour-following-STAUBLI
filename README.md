@@ -1,24 +1,35 @@
-# Suivi de contour et commande en effort -- Staubli TX2-90
+# Suivi de contour et regulation de force -- Staubli TX2-90
 
-Travaux pratiques de robotique industrielle sur le robot Staubli TX2-90, realises a l'ENSMM Besancon. Programmation en Val 3 et simulation sous Staubli Robotics Suite (SRS). Les travaux couvrent le suivi de contour avec controle de force, la prise a la volee sur convoyeur, et la synchronisation d'axes.
+Programmes VAL3 developpes dans le cadre des TP de robotique industrielle sur cellule Staubli TX2-90 a l'ENSMM.
 
 ## Contenu
 
-- `contour_following.py` : simulation du suivi de contour avec regulation de force normale, discretisation de la trajectoire le long d'un profil quelconque
-- `pick_on_the_fly.py` : calcul de la trajectoire de prise a la volee sur un convoyeur en mouvement, synchronisation vitesse robot / convoyeur
-- `axis_sync.py` : synchronisation d'axes pour un deplacement coordonne multi-robot ou robot + axe externe
-- `force_control.py` : boucle de regulation PID en effort, simulation de l'interaction outil-piece avec raideur de contact
+### contourSuivi.pgx
+Suivi de contour avec regulation de force normale. Asservissement hybride position/force avec adaptation des gains PID en fonction de la courbure locale du profil piece. Plusieurs types de profils (sinusoidal, arc, marches, spline). Compensation du poids outil et detection de perte de contact.
 
-## Notions couvertes
+### regulationForce.pgx
+Regulation PID en effort avec comparaison de plusieurs structures de correcteurs (P, PI, PID, PID + feedforward). Auto-reglage par methode de Ziegler-Nichols en boucle fermee. Predicteur de Smith pour la compensation du retard pur. Gestion de l'anti-windup et derivee filtree.
 
-- Commande en effort (force control) avec capteur force/couple
-- Suivi de trajectoire avec asservissement hybride position/force
-- Prise a la volee (pick on the fly) sur convoyeur
-- Synchronisation d'axes (tracking convoyeur)
-- Profils de vitesse trapezoIdaux
-- Interpolation circulaire et lineaire (MoveL, MoveC)
+### pickOnTheFly.pgx
+Prise a la volee sur convoyeur avec suivi par encodeur incremental. Deux strategies d'approche (par le dessus, laterale). Cycle complet pick-and-place avec verification de faisabilite cinematique, modele probabiliste de reussite, et synchronisation robot-convoyeur.
 
-## Dependances
+### syncAxes.pgx
+Synchronisation multi-axes pour coordination robot + axe externe (rail lineaire). Profils de vitesse trapezoidal et en S (limitation du jerk). Raccordement en zone fine entre segments. Engrenage electronique, profil de came, et compensation du jeu mecanique (backlash) dans les reducteurs.
 
-- Python 3.8+
-- numpy, matplotlib, scipy
+## Environnement
+
+- Robot : Staubli TX2-90
+- Controleur : CS9 / VAL3
+- Capteur d'effort : 6 axes
+- Pince : Robotiq 2F-85
+- Convoyeur avec encodeur incremental
+- Axe externe lineaire
+- Plateforme FiRAC, ENSMM / Etupes
+
+## Competences
+
+- Programmation VAL3 (langage natif Staubli)
+- Regulation PID industrielle et controle en impedance
+- Synchronisation multi-axes et profils de mouvement
+- Suivi de contour avec capteur d'effort
+- Pick on the fly avec suivi encodeur convoyeur

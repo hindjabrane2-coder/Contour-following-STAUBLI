@@ -1,0 +1,233 @@
+// contourSuivi.pgx
+// Suivi de contour avec regulation de force normale
+// Asservissement hybride position/force, adaptation des gains selon la courbure
+// TP robotique industrielle -- Staubli TX2-90
+
+program contourSuivi
+
+  // types et variables globales
+  local joint jDepart, jApproche
+  local point pDepart, pApproche, pCible, pOutil
+  local tool tOutil
+  local frame fPiece
+  local num nFConsigne, nRaideur, nDt
+  local num nKp, nKi, nKd
+  local num nErrInt, nErrPrec, nVitNormale
+  local num nForce, nCorrection, nOffsetNom
+  local num nCourbure, nFacteurAdapt
+  local num nKpA, nKiA, nKdA
+  local bool bContact
+
+  // parametres de regulation
+  local num nBiais = 0.15
+  local num nSigmaBruit = 0.05
+  local num nDerive = 0.01
+  local num nResolution = 0.01
+  local num nMasseOutil = 0.8
+  local num nG = 9.81
+
+  // tableau de points de contour
+  local num nNbPoints = 300
+  local num tXProfil[300]
+  local num tYProfil[300]
+  local num tNx[300]
+  local num tNy[300]
+  local num tCourbures[300]
+  local num tForces[300]
+
+begin
+  nFConsigne = 10.0
+  nRaideur = 50.0
+  nDt = 0.005
+  nKp = 0.5
+  nKi = 0.02
+  nKd = 0.1
+
+  // initialiser l'outil et le repere piece
+  tOutil.trsf.x = 0
+  tOutil.trsf.y = 0
+  tOutil.trsf.z = 120
+  fPiece = world
+
+  call genererProfilSinusoidal(tXProfil, tYProfil, nNbPoints)
+  call calculerNormales(tXProfil, tYProfil, tNx, tNy, nNbPoints)
+  call calculerCourbures(tXProfil, tYProfil, tCourbures, nNbPoints)
+
+  logMsg("Debut suivi de contour")
+  logMsg("Consigne force : " + toString("", nFConsigne) + " N")
+
+  nOffsetNom = nFConsigne / nRaideur
+  nErrInt = 0
+  nErrPrec = 0
+  nVitNormale = 0
+
+  // approche initiale
+  pApproche = composePose(tXProfil[0], tYProfil[0], 50, 0, 0, 0)
+  movej(pApproche, tOutil, mNomSpeed)
+  wait(isSettled())
+
+  // boucle de suivi
+  local num i
+  for i = 0 to nNbPoints - 1
+    call lireForce(nForce, i * nDt)
+    bContact = (nForce > 0.5)
+
+    // gains adaptatifs selon la courbure locale
+    nCourbure = tCourbures[i]
+    nFacteurAdapt = 1.0 / (1.0 + 50.0 * nCourbure)
+    nKpA = nKp * nFacteurAdapt
+    nKiA = nKi * nFacteurAdapt
+    nKdA = nKd * (2.0 - nFacteurAdapt)
+
+    // PID adaptatif
+    local num nErreur
+    nErreur = nFConsigne - nForce
+    nErrInt = nErrInt + nErreur * nDt
+    if nErrInt > 5
+      nErrInt = 5
+    elseIf nErrInt < -5
+      nErrInt = -5
+    endIf
+
+    nCorrection = nKpA * nErreur + nKiA * nErrInt + nKdA * (nErreur - nErrPrec) / nDt
+    nErrPrec = nErreur
+
+    // feedforward courbure
+    local num nFF
+    nFF = 0.001 * 60.0 * nCourbure
+    nCorrection = nCorrection + nFF
+
+    nVitNormale = nCorrection / nDt
+
+    // position corrigee
+    local num nOffsetCorr
+    nOffsetCorr = nOffsetNom + nCorrection
+    if nOffsetCorr < 0.01
+      nOffsetCorr = 0.01
+    elseIf nOffsetCorr > 3 * nOffsetNom
+      nOffsetCorr = 3 * nOffsetNom
+    endIf
+
+    pOutil.trsf.x = tXProfil[i] + tNx[i] * nOffsetCorr
+    pOutil.trsf.y = tYProfil[i] + tNy[i] * nOffsetCorr
+    pOutil.trsf.z = 0
+
+    movel(pOutil, tOutil, mNomSpeed * 0.3)
+
+    tForces[i] = nForce
+
+    // recuperation perte de contact
+    if !bContact and i > 10
+      pOutil.trsf.x = tXProfil[i] + tNx[i] * nOffsetNom * 0.5
+      pOutil.trsf.y = tYProfil[i] + tNy[i] * nOffsetNom * 0.5
+      nErrInt = 0
+      movel(pOutil, tOutil, mNomSpeed * 0.1)
+    endIf
+  endFor
+
+  logMsg("Suivi termine")
+
+  // calcul des metriques
+  call afficherMetriques(tForces, nFConsigne, nNbPoints, nDt)
+
+  // retour position repos
+  movej(jDepart, mNomSpeed)
+  wait(isSettled())
+
+end
+
+// generation du profil sinusoidal
+program genererProfilSinusoidal(num& tX[], num& tY[], num nPts)
+  local num i, t
+  for i = 0 to nPts - 1
+    t = i / (nPts - 1.0)
+    tX[i] = t * 300.0
+    tY[i] = 20.0 * sin(2 * 3.14159 * t) + 10.0 * sin(6 * 3.14159 * t) + 5.0 * cos(4 * 3.14159 * t + 0.5)
+  endFor
+end
+
+// calcul des normales au profil
+program calculerNormales(num tX[], num tY[], num& tNx[], num& tNy[], num nPts)
+  local num i, dx, dy, longueur
+  for i = 0 to nPts - 1
+    if i == 0
+      dx = tX[1] - tX[0]
+      dy = tY[1] - tY[0]
+    elseIf i == nPts - 1
+      dx = tX[i] - tX[i-1]
+      dy = tY[i] - tY[i-1]
+    else
+      dx = (tX[i+1] - tX[i-1]) / 2
+      dy = (tY[i+1] - tY[i-1]) / 2
+    endIf
+    longueur = sqrt(dx * dx + dy * dy)
+    if longueur < 0.0001
+      longueur = 0.0001
+    endIf
+    tNx[i] = -dy / longueur
+    tNy[i] = dx / longueur
+  endFor
+end
+
+// calcul de la courbure locale
+program calculerCourbures(num tX[], num tY[], num& tC[], num nPts)
+  local num i, dx, dy, ddx, ddy, denom
+  for i = 1 to nPts - 2
+    dx = (tX[i+1] - tX[i-1]) / 2
+    dy = (tY[i+1] - tY[i-1]) / 2
+    ddx = tX[i+1] - 2 * tX[i] + tX[i-1]
+    ddy = tY[i+1] - 2 * tY[i] + tY[i-1]
+    denom = power(dx * dx + dy * dy, 1.5)
+    if denom < 0.0000001
+      denom = 0.0000001
+    endIf
+    tC[i] = abs(dx * ddy - dy * ddx) / denom
+  endFor
+  tC[0] = tC[1]
+  tC[nPts - 1] = tC[nPts - 2]
+end
+
+// lecture du capteur d'effort avec bruit et compensation
+program lireForce(num& nForceMesuree, num nTemps)
+  local num nBrut, nPoidsProjete
+  nBrut = getFcForce(tOutil)
+  nPoidsProjete = nMasseOutil * nG
+  nBrut = nBrut + nBiais + nDerive * nTemps
+  nForceMesuree = nBrut - nPoidsProjete - nBiais
+  if nForceMesuree < 0
+    nForceMesuree = 0
+  endIf
+end
+
+// affichage des metriques de performance
+program afficherMetriques(num tF[], num nCons, num nPts, num nDt)
+  local num i, nMAE, nRMS, nMaxErr, nErr
+  nMAE = 0
+  nRMS = 0
+  nMaxErr = 0
+  for i = 0 to nPts - 1
+    nErr = abs(tF[i] - nCons)
+    nMAE = nMAE + nErr
+    nRMS = nRMS + nErr * nErr
+    if nErr > nMaxErr
+      nMaxErr = nErr
+    endIf
+  endFor
+  nMAE = nMAE / nPts
+  nRMS = sqrt(nRMS / nPts)
+  logMsg("MAE  : " + toString(".3", nMAE) + " N")
+  logMsg("RMS  : " + toString(".3", nRMS) + " N")
+  logMsg("Max  : " + toString(".3", nMaxErr) + " N")
+end
+
+// compose un point a partir de coordonnees cartesiennes
+program composePose(num x, num y, num z, num rx, num ry, num rz) : point
+  local point p
+  p.trsf.x = x
+  p.trsf.y = y
+  p.trsf.z = z
+  p.trsf.rx = rx
+  p.trsf.ry = ry
+  p.trsf.rz = rz
+  return p
+end

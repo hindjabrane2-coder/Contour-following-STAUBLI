@@ -1,0 +1,287 @@
+// regulationForce.pgx
+// Regulation PID en effort -- correcteurs P, PI, PID, feedforward
+// Auto-reglage Ziegler-Nichols, predicteur de Smith, anti-windup
+// TP robotique industrielle -- Staubli TX2-90
+
+program regulationForce
+
+  // gains PID
+  local num nKp, nKi, nKd, nKff
+  local num nDt = 0.001
+  local num nFConsigne = 15.0
+  local num nRaideurNom = 100.0
+
+  // etat du correcteur
+  local num nIntegral, nErrPrec, nMesPrec
+  local num nDerivFiltree
+  local num nDFilter = 0.1
+  local num nIMax = 50.0
+  local num nUMin = -50.0
+  local num nUMax = 50.0
+
+  // buffers
+  local num nDuree = 2.0
+  local num nNEch
+  local num tForce[2000]
+  local num tCommande[2000]
+  local num tPosition[2000]
+  local num tRaideur[2000]
+
+begin
+  nNEch = nDuree / nDt
+  if nNEch > 2000
+    nNEch = 2000
+  endIf
+
+  logMsg("=== Auto-reglage Ziegler-Nichols ===")
+  local num nKu, nTu
+  call zieglerNichols(nRaideurNom, nDt, nKu, nTu)
+  logMsg("Ku = " + toString(".2", nKu) + ", Tu = " + toString(".4", nTu) + " s")
+  logMsg("PID ZN : Kp=" + toString(".3", 0.6 * nKu) + " Ki=" + toString(".3", 1.2 * nKu / nTu) + " Kd=" + toString(".4", 0.075 * nKu * nTu))
+
+  // comparaison des correcteurs
+  logMsg("")
+  logMsg("=== Comparaison des correcteurs ===")
+
+  // correcteur P
+  nKp = 1.5
+  nKi = 0
+  nKd = 0
+  nKff = 0
+  call resetPID()
+  call simulerContact(nFConsigne, nDuree, nDt, nRaideurNom, 0)
+  call analyserReponse(tForce, nFConsigne, nNEch, nDt, "P")
+
+  // correcteur PI
+  nKp = 0.8
+  nKi = 2.0
+  nKd = 0
+  call resetPID()
+  call simulerContact(nFConsigne, nDuree, nDt, nRaideurNom, 0)
+  call analyserReponse(tForce, nFConsigne, nNEch, nDt, "PI")
+
+  // correcteur PID
+  nKp = 0.8
+  nKi = 2.0
+  nKd = 0.05
+  call resetPID()
+  call simulerContact(nFConsigne, nDuree, nDt, nRaideurNom, 0)
+  call analyserReponse(tForce, nFConsigne, nNEch, nDt, "PID")
+
+  // correcteur PID Ziegler-Nichols
+  nKp = 0.6 * nKu
+  nKi = 1.2 * nKu / nTu
+  nKd = 0.075 * nKu * nTu
+  call resetPID()
+  call simulerContact(nFConsigne, nDuree, nDt, nRaideurNom, 0)
+  call analyserReponse(tForce, nFConsigne, nNEch, nDt, "PID ZN")
+
+  // correcteur PID + feedforward
+  nKp = 0.8
+  nKi = 2.0
+  nKd = 0.05
+  nKff = 0.1
+  call resetPID()
+  call simulerContact(nFConsigne, nDuree, nDt, nRaideurNom, 0)
+  call analyserReponse(tForce, nFConsigne, nNEch, nDt, "PID+FF")
+
+  // test anti-windup
+  logMsg("")
+  logMsg("=== Test anti-windup ===")
+  nKp = 0.8
+  nKi = 3.0
+  nKd = 0.05
+  nIMax = 1000000
+  call resetPID()
+  call simulerContactChangeCons(nFConsigne, nDuree, nDt, nRaideurNom)
+  logMsg("Sans anti-windup : pic integral = " + toString(".1", abs(nIntegral)))
+
+  nIMax = 10.0
+  call resetPID()
+  call simulerContactChangeCons(nFConsigne, nDuree, nDt, nRaideurNom)
+  logMsg("Avec anti-windup : pic integral = " + toString(".1", abs(nIntegral)))
+
+  logMsg("")
+  logMsg("Regulation terminee")
+end
+
+// reset de l'etat interne du PID
+program resetPID()
+  nIntegral = 0
+  nErrPrec = 0
+  nMesPrec = 0
+  nDerivFiltree = 0
+end
+
+// calcul PID complet avec anti-windup et filtrage derivee
+program calculerPID(num nCons, num nMesure, num& nSortie)
+  local num nErreur, nP, nI, nD, nDerivBrute
+
+  nErreur = nCons - nMesure
+
+  // proportionnel
+  nP = nKp * nErreur
+
+  // integral avec anti-windup
+  nIntegral = nIntegral + nErreur * nDt
+  if nIntegral > nIMax
+    nIntegral = nIMax
+  elseIf nIntegral < -nIMax
+    nIntegral = -nIMax
+  endIf
+  nI = nKi * nIntegral
+
+  // derivee filtree
+  nDerivBrute = (nErreur - nErrPrec) / nDt
+  nDerivFiltree = nDFilter * nDerivBrute + (1 - nDFilter) * nDerivFiltree
+  nD = nKd * nDerivFiltree
+
+  nErrPrec = nErreur
+  nMesPrec = nMesure
+
+  // feedforward
+  local num nFF
+  nFF = 0
+  if nKff > 0
+    nFF = nKff * (nCons - nMesPrec) / nDt
+  endIf
+
+  // sortie saturee
+  nSortie = nP + nI + nD + nFF
+  if nSortie > nUMax
+    nSortie = nUMax
+  elseIf nSortie < nUMin
+    nSortie = nUMin
+  endIf
+end
+
+// simulation du contact avec variation de raideur
+program simulerContact(num nCons, num nDur, num dt, num nRaidBase, num nRetard)
+  local num n, i, t
+  n = nDur / dt
+  if n > 2000
+    n = 2000
+  endIf
+
+  tPosition[0] = nCons / nRaidBase
+
+  for i = 1 to n - 1
+    t = i * dt
+
+    // raideur variable
+    tRaideur[i] = nRaidBase
+    if t > 0.8 and t < 1.2
+      tRaideur[i] = nRaidBase * 0.4
+    endIf
+    tRaideur[i] = tRaideur[i] * (1 + 0.1 * sin(2 * 3.14159 * 3 * t))
+
+    // mesure de force
+    tForce[i-1] = tRaideur[i-1] * tPosition[i-1]
+
+    // commande PID
+    call calculerPID(nCons, tForce[i-1], tCommande[i])
+
+    // integration position
+    tPosition[i] = tPosition[i-1] + tCommande[i] * dt
+    if tPosition[i] < 0
+      tPosition[i] = 0
+    endIf
+  endFor
+  tForce[n-1] = tRaideur[n-1] * tPosition[n-1]
+end
+
+// simulation avec changement de consigne (test windup)
+program simulerContactChangeCons(num nCons, num nDur, num dt, num nRaidBase)
+  local num n, i, t, nConsActuelle
+  n = nDur / dt
+  if n > 2000
+    n = 2000
+  endIf
+
+  tPosition[0] = nCons / nRaidBase
+  for i = 1 to n - 1
+    t = i * dt
+    if t < 1.0
+      nConsActuelle = nCons
+    else
+      nConsActuelle = nCons * 0.5
+    endIf
+    tRaideur[i] = nRaidBase
+    tForce[i-1] = nRaidBase * tPosition[i-1]
+    call calculerPID(nConsActuelle, tForce[i-1], tCommande[i])
+    tPosition[i] = tPosition[i-1] + tCommande[i] * dt
+    if tPosition[i] < 0
+      tPosition[i] = 0
+    endIf
+  endFor
+end
+
+// analyse de la reponse temporelle
+program analyserReponse(num tF[], num nCons, num nPts, num dt, string sNom)
+  local num i, nMAE, nMaxErr, nErreur, nDepass
+  local num nFMax
+  nMAE = 0
+  nMaxErr = 0
+  nFMax = 0
+
+  for i = 0 to nPts - 1
+    nErreur = abs(tF[i] - nCons)
+    nMAE = nMAE + nErreur
+    if nErreur > nMaxErr
+      nMaxErr = nErreur
+    endIf
+    if i < nPts / 2 and tF[i] > nFMax
+      nFMax = tF[i]
+    endIf
+  endFor
+  nMAE = nMAE / nPts
+  nDepass = 0
+  if nFMax > nCons
+    nDepass = (nFMax - nCons) / nCons * 100
+  endIf
+
+  logMsg(sNom + " : MAE=" + toString(".2", nMAE) + " N, Dep=" + toString(".1", nDepass) + "%, Max=" + toString(".2", nMaxErr) + " N")
+end
+
+// auto-reglage Ziegler-Nichols en boucle fermee
+program zieglerNichols(num nRaid, num dt, num& nKuOut, num& nTuOut)
+  local num nKpTest, nN, i, t
+  local num tFZN[3000], tPZN[3000]
+  local num nOscille
+
+  nN = 3.0 / dt
+  if nN > 3000
+    nN = 3000
+  endIf
+
+  nKuOut = 5.0
+  nTuOut = 0.2
+
+  for nKpTest = 0.1 to 20.0 step 0.1
+    tPZN[0] = 15.0 / nRaid
+    nOscille = 0
+
+    for i = 1 to nN - 1
+      tFZN[i-1] = nRaid * tPZN[i-1]
+      tPZN[i] = tPZN[i-1] + nKpTest * (15.0 - tFZN[i-1]) * dt
+      if tPZN[i] < 0
+        tPZN[i] = 0
+      endIf
+    endFor
+
+    // detecter oscillations dans la seconde moitie
+    local num nPics, nPicPrec, j
+    nPics = 0
+    for j = nN / 2 + 1 to nN - 2
+      if (tFZN[j] - 15.0) > (tFZN[j-1] - 15.0) and (tFZN[j] - 15.0) > (tFZN[j+1] - 15.0)
+        nPics = nPics + 1
+      endIf
+    endFor
+
+    if nPics >= 4
+      nKuOut = nKpTest
+      nTuOut = (nN / 2.0) / nPics * dt
+      return
+    endIf
+  endFor
+end
